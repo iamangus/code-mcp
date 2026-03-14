@@ -1,0 +1,11 @@
+# Go build artifacts
+/code-mcp
+/dist/
+
+# Environment
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
