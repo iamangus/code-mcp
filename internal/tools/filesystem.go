@@ -15,6 +15,13 @@ import (
 
 const MaxFileSize = 1 << 20 // 1 MiB
 
+// fuzzyMatchThreshold is the minimum LCS-based similarity ratio required to
+// accept a fuzzy match in search_and_replace. A value of 0.85 requires the
+// candidate window to share at least 85% of characters with the search_block
+// after whitespace normalisation. Below this threshold the match is too
+// ambiguous to apply safely, and the closest snippet is returned to the agent.
+const fuzzyMatchThreshold = 0.85
+
 var ignoreDirs = map[string]bool{
 	".git": true, "node_modules": true, "build": true, "dist": true,
 	".next": true, "__pycache__": true, ".cache": true, "coverage": true,
@@ -299,7 +306,7 @@ func SearchAndReplace(worktreeRoot, filePath, searchBlock, replaceBlock string, 
 		}
 	}
 
-	if bestRatio >= 0.85 {
+	if bestRatio >= fuzzyMatchThreshold {
 		var newLines []string
 		newLines = append(newLines, fileLines[:bestStart]...)
 		newLines = append(newLines, strings.Split(replaceBlock, "\n")...)
