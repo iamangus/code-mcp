@@ -1,53 +1,56 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
-	"time"
+	"strings"
+	"sync"
 
 	"github.com/iamangus/code-mcp/internal/locks"
-	"github.com/iamangus/code-mcp/internal/tools"
-	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/iamangus/code-mcp/internal/manager"
 	"github.com/mark3labs/mcp-go/server"
 )
 
 func main() {
 	var (
-		mode = flag.String("mode", "stdio", "Transport mode: stdio or http")
-		addr = flag.String("addr", ":8080", "HTTP listen address (used when mode=http)")
-		dir  = flag.String("dir", "", "Absolute path to the worktree root directory (required)")
+		mode     = flag.String("mode", "stdio", "Transport mode: stdio or http (single-server mode only)")
+		addr     = flag.String("addr", ":8080", "HTTP listen address")
+		dir      = flag.String("dir", "", "Single-server mode: absolute path to the worktree root directory")
+		reposDir = flag.String("repos-dir", "/repos", "Multi-server mode: directory containing all repositories")
 	)
 	flag.Parse()
 
-	if *dir == "" {
-		fmt.Fprintln(os.Stderr, "error: --dir is required")
-		flag.Usage()
-		os.Exit(1)
+	// ── Single-server (backward-compatible) mode ──────────────────────────
+	if *dir != "" {
+		runSingleServer(*mode, *addr, *dir)
+		return
 	}
-	info, err := os.Stat(*dir)
+
+	// ── Multi-server mode ──────────────────────────────────────────────────
+	runMultiServer(*addr, *reposDir)
+}
+
+// runSingleServer is the original single-repo behaviour, kept for backward
+// compatibility when --dir is provided.
+func runSingleServer(mode, addr, dir string) {
+	info, err := os.Stat(dir)
 	if err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "error: --dir %q does not exist or is not a directory\n", *dir)
+		fmt.Fprintf(os.Stderr, "error: --dir %q does not exist or is not a directory\n", dir)
 		os.Exit(1)
 	}
 
 	lm := locks.NewManager()
+	s := server.NewMCPServer("code-mcp", "1.0.0", server.WithToolCapabilities(true))
+	registerTools(s, lm, dir)
 
-	s := server.NewMCPServer(
-		"code-mcp",
-		"1.0.0",
-		server.WithToolCapabilities(true),
-	)
-
-	registerTools(s, lm, *dir)
-
-	switch *mode {
+	switch mode {
 	case "http":
 		httpSrv := server.NewStreamableHTTPServer(s)
-		log.Printf("Starting HTTP MCP server on %s", *addr)
-		if err := httpSrv.Start(*addr); err != nil {
+		log.Printf("Starting HTTP MCP server on %s (dir=%s)", addr, dir)
+		if err := httpSrv.Start(addr); err != nil {
 			fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 			os.Exit(1)
 		}
@@ -59,220 +62,87 @@ func main() {
 	}
 }
 
-func registerTools(s *server.MCPServer, lm *locks.Manager, worktreeRoot string) {
-	// read_file
-	s.AddTool(
-		mcp.NewTool("read_file",
-			mcp.WithDescription("Read the entire contents of a file within the worktree."),
-			mcp.WithString("filepath", mcp.Required(), mcp.Description("Path to the file, relative to the worktree root.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			fp, err := req.RequireString("filepath")
-			if err != nil {
-				log.Printf("tool=read_file error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			content, toolErr := tools.ReadFile(worktreeRoot, fp, lm)
-			if toolErr != nil {
-				log.Printf("tool=read_file filepath=%q error=%q elapsed=%dms", fp, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=read_file filepath=%q ok elapsed=%dms", fp, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(content), nil
-		},
-	)
+// runMultiServer starts the multi-repo HTTP server.
+//
+// MCP endpoint layout:  http://host:port/{repo}/{branch}/mcp
+// Management API:       http://host:port/api/repos[/...]
+func runMultiServer(addr, reposDir string) {
+	mgr, err := manager.New(reposDir)
+	if err != nil {
+		log.Fatalf("manager: %v", err)
+	}
 
-	// read_lines
-	s.AddTool(
-		mcp.NewTool("read_lines",
-			mcp.WithDescription("Read a range of lines from a file within the worktree (1-indexed, inclusive)."),
-			mcp.WithString("filepath", mcp.Required(), mcp.Description("Path to the file, relative to the worktree root.")),
-			mcp.WithNumber("start_line", mcp.Required(), mcp.Description("First line to read (1-indexed).")),
-			mcp.WithNumber("end_line", mcp.Required(), mcp.Description("Last line to read (1-indexed, inclusive).")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			fp, err := req.RequireString("filepath")
-			if err != nil {
-				log.Printf("tool=read_lines error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			startLine := req.GetInt("start_line", 1)
-			endLine := req.GetInt("end_line", 1)
-			content, toolErr := tools.ReadLines(worktreeRoot, fp, startLine, endLine, lm)
-			if toolErr != nil {
-				log.Printf("tool=read_lines filepath=%q start=%d end=%d error=%q elapsed=%dms", fp, startLine, endLine, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=read_lines filepath=%q start=%d end=%d ok elapsed=%dms", fp, startLine, endLine, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(content), nil
-		},
-	)
+	// handlers maps "repo/branch" → http.Handler for that MCP server.
+	var mu sync.RWMutex
+	handlers := make(map[string]http.Handler)
 
-	// create_file
-	s.AddTool(
-		mcp.NewTool("create_file",
-			mcp.WithDescription("Create a new file with specified content within the worktree. Fails if the file already exists."),
-			mcp.WithString("filepath", mcp.Required(), mcp.Description("Path for the new file, relative to the worktree root.")),
-			mcp.WithString("content", mcp.Required(), mcp.Description("Content to write to the new file.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			fp, err := req.RequireString("filepath")
-			if err != nil {
-				log.Printf("tool=create_file error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			content, err := req.RequireString("content")
-			if err != nil {
-				log.Printf("tool=create_file filepath=%q error=%q elapsed=%dms", fp, err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			msg, toolErr := tools.CreateFile(worktreeRoot, fp, content, lm)
-			if toolErr != nil {
-				log.Printf("tool=create_file filepath=%q error=%q elapsed=%dms", fp, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=create_file filepath=%q ok elapsed=%dms", fp, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(msg), nil
-		},
-	)
+	addHandler := func(repo, branch, dir string) {
+		key := repo + "/" + branch
+		h := newMCPHandler(dir)
+		mu.Lock()
+		handlers[key] = h
+		mu.Unlock()
+		log.Printf("registered MCP handler for %s/%s -> %s", repo, branch, dir)
+	}
 
-	// list_directory
-	s.AddTool(
-		mcp.NewTool("list_directory",
-			mcp.WithDescription("List the contents of a directory within the worktree."),
-			mcp.WithString("dirpath", mcp.Required(), mcp.Description("Path to the directory to list, relative to the worktree root.")),
-			mcp.WithBoolean("recursive", mcp.Description("If true, list recursively. Default: false.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			dirPath, err := req.RequireString("dirpath")
-			if err != nil {
-				log.Printf("tool=list_directory error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			recursive := req.GetBool("recursive", false)
-			listing, toolErr := tools.ListDirectory(worktreeRoot, dirPath, recursive, lm)
-			if toolErr != nil {
-				log.Printf("tool=list_directory dirpath=%q recursive=%t error=%q elapsed=%dms", dirPath, recursive, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=list_directory dirpath=%q recursive=%t ok elapsed=%dms", dirPath, recursive, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(listing), nil
-		},
-	)
+	removeHandler := func(repo, branch string) {
+		key := repo + "/" + branch
+		mu.Lock()
+		delete(handlers, key)
+		mu.Unlock()
+		log.Printf("unregistered MCP handler for %s/%s", repo, branch)
+	}
 
-	// grep_search
-	s.AddTool(
-		mcp.NewTool("grep_search",
-			mcp.WithDescription("Search for a pattern (regex or literal) within files in the worktree."),
-			mcp.WithString("query", mcp.Required(), mcp.Description("Search pattern (regex or literal string).")),
-			mcp.WithString("directory", mcp.Description("Optional subdirectory to search within, relative to the worktree root.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			query, err := req.RequireString("query")
-			if err != nil {
-				log.Printf("tool=grep_search error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			directory := req.GetString("directory", "")
-			results, toolErr := tools.GrepSearch(worktreeRoot, query, directory, lm)
-			if toolErr != nil {
-				log.Printf("tool=grep_search query=%q directory=%q error=%q elapsed=%dms", query, directory, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=grep_search query=%q directory=%q ok elapsed=%dms", query, directory, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(results), nil
-		},
-	)
+	// Discover existing repos on startup.
+	repos, err := mgr.Scan()
+	if err != nil {
+		log.Fatalf("scanning repos: %v", err)
+	}
+	for _, repo := range repos {
+		for _, b := range repo.Branches {
+			addHandler(repo.Name, b.Name, b.Dir)
+		}
+	}
+	log.Printf("startup: found %d repo(s) in %s", len(repos), reposDir)
 
-	// search_and_replace
-	s.AddTool(
-		mcp.NewTool("search_and_replace",
-			mcp.WithDescription("Find a block of text in a file and replace it. Uses exact match, then fuzzy match."),
-			mcp.WithString("filepath", mcp.Required(), mcp.Description("Path to the file, relative to the worktree root.")),
-			mcp.WithString("search_block", mcp.Required(), mcp.Description("The exact block of text to find.")),
-			mcp.WithString("replace_block", mcp.Required(), mcp.Description("The text to replace the search_block with.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			fp, err := req.RequireString("filepath")
-			if err != nil {
-				log.Printf("tool=search_and_replace error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			searchBlock, err := req.RequireString("search_block")
-			if err != nil {
-				log.Printf("tool=search_and_replace filepath=%q error=%q elapsed=%dms", fp, err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			replaceBlock, err := req.RequireString("replace_block")
-			if err != nil {
-				log.Printf("tool=search_and_replace filepath=%q error=%q elapsed=%dms", fp, err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			result, toolErr := tools.SearchAndReplace(worktreeRoot, fp, searchBlock, replaceBlock, lm)
-			if toolErr != nil {
-				log.Printf("tool=search_and_replace filepath=%q error=%q elapsed=%dms", fp, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=search_and_replace filepath=%q ok elapsed=%dms", fp, time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(result), nil
-		},
-	)
+	// Use two separate ServeMux instances to avoid Go 1.22+ pattern-conflict
+	// panics between the catch-all MCP wildcard and the API routes.
 
-	// execute_terminal_command
-	s.AddTool(
-		mcp.NewTool("execute_terminal_command",
-			mcp.WithDescription("Execute a shell command in the worktree directory."),
-			mcp.WithString("command", mcp.Required(), mcp.Description("Shell command to execute.")),
-			mcp.WithNumber("timeout_seconds", mcp.Description("Maximum execution time in seconds. Default: 120.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			command, err := req.RequireString("command")
-			if err != nil {
-				log.Printf("tool=execute_terminal_command error=%q elapsed=%dms", err, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			timeoutSecs := req.GetInt("timeout_seconds", 120)
-			timeout := time.Duration(timeoutSecs) * time.Second
+	// MCP mux: /{repo}/{branch}/mcp
+	mcpMux := http.NewServeMux()
+	mcpMux.HandleFunc("/{repo}/{branch}/mcp", func(w http.ResponseWriter, r *http.Request) {
+		repo := r.PathValue("repo")
+		branch := r.PathValue("branch")
+		mu.RLock()
+		h, ok := handlers[repo+"/"+branch]
+		mu.RUnlock()
+		if !ok {
+			http.Error(w, fmt.Sprintf("no MCP server for %s/%s", repo, branch), http.StatusNotFound)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 
-			stdout, stderr, exitCode, timedOut, toolErr := tools.ExecuteTerminalCommand(worktreeRoot, command, timeout)
-			if toolErr != nil {
-				log.Printf("tool=execute_terminal_command command=%q error=%q elapsed=%dms", command, toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
+	// API mux: /api/...
+	apiMux := http.NewServeMux()
+	registerAPIRoutes(apiMux, mgr, addHandler, removeHandler)
 
-			var result string
-			if timedOut {
-				log.Printf("tool=execute_terminal_command command=%q timed_out=true elapsed=%dms", command, time.Since(start).Milliseconds())
-				result = fmt.Sprintf("Command timed out after %d seconds.\nstdout: %s\nstderr: %s", timeoutSecs, stdout, stderr)
-			} else {
-				log.Printf("tool=execute_terminal_command command=%q exit_code=%d elapsed=%dms", command, exitCode, time.Since(start).Milliseconds())
-				result = fmt.Sprintf("Exit code: %d\nstdout: %s\nstderr: %s", exitCode, stdout, stderr)
-			}
-			return mcp.NewToolResultText(result), nil
-		},
-	)
+	// Top-level handler: dispatch to API mux for /api/ paths, otherwise MCP mux.
+	// We use a manual prefix check rather than a single ServeMux because Go
+	// 1.22+ strict pattern-conflict detection panics when the wildcard MCP
+	// route (/{repo}/{branch}/mcp) is registered alongside method-qualified API
+	// routes (e.g. DELETE /api/repos/{repo}) in the same mux — both could match
+	// a path like /api/repos/mcp.
+	top := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			apiMux.ServeHTTP(w, r)
+			return
+		}
+		mcpMux.ServeHTTP(w, r)
+	})
 
-	// get_git_diff
-	s.AddTool(
-		mcp.NewTool("get_git_diff",
-			mcp.WithDescription("Get the git diff and status for the worktree."),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			diff, toolErr := tools.GetGitDiff(worktreeRoot)
-			if toolErr != nil {
-				log.Printf("tool=get_git_diff error=%q elapsed=%dms", toolErr, time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			log.Printf("tool=get_git_diff ok elapsed=%dms", time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(diff), nil
-		},
-	)
+	log.Printf("starting multi-server on %s  (repos-dir=%s)", addr, reposDir)
+	if err := http.ListenAndServe(addr, top); err != nil {
+		log.Fatalf("server: %v", err)
+	}
 }
