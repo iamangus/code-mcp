@@ -13,8 +13,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /code-mcp ./cmd/code-mcp
 # ---- runtime ----
 FROM debian:bookworm-slim
 
-# git  – needed for clone in entrypoint and for git-diff tool
-# ca-certificates – needed for HTTPS clones
+# git              – needed for clone/worktree operations via the management API
+# ca-certificates  – needed for HTTPS clones
 RUN apt-get update -qq \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -22,6 +22,10 @@ RUN apt-get update -qq \
 COPY --from=builder /code-mcp /usr/local/bin/code-mcp
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+# Default repos root; mount a volume here for persistence.
+RUN mkdir -p /repos
+VOLUME ["/repos"]
 
 EXPOSE 8080
 
