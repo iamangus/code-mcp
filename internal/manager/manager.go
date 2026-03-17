@@ -211,6 +211,22 @@ func (m *Manager) CreateWorktree(repo, branch string) error {
 		log.Printf("manager: git fetch in %q (non-fatal): %v\n%s", repoDir, fetchErr, out)
 	}
 
+	// Check whether the branch already exists (locally or as a remote-tracking ref).
+	// If it does, check it out directly; otherwise create a new branch off HEAD.
+	_, refErr := runCmd(repoDir, "git", "rev-parse", "--verify", branch)
+	if refErr != nil {
+		// Also check for a remote-tracking ref (origin/<branch>).
+		_, remoteRefErr := runCmd(repoDir, "git", "rev-parse", "--verify", "origin/"+branch)
+		if remoteRefErr != nil {
+			// Branch does not exist anywhere — create it off HEAD.
+			if out, err := runCmd(repoDir, "git", "worktree", "add", "-b", branch, worktreeDir, "HEAD"); err != nil {
+				return fmt.Errorf("git worktree add: %w\n%s", err, out)
+			}
+			return nil
+		}
+	}
+
+	// Branch exists locally or at origin — check it out into the worktree.
 	if out, err := runCmd(repoDir, "git", "worktree", "add", worktreeDir, branch); err != nil {
 		return fmt.Errorf("git worktree add: %w\n%s", err, out)
 	}
