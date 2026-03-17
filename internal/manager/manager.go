@@ -274,6 +274,55 @@ func (m *Manager) MergeBranch(repo, sourceBranch, targetBranch string) error {
 	return nil
 }
 
+// CommitInfo describes a single commit returned by GetCommits.
+type CommitInfo struct {
+	Hash    string `json:"hash"`
+	Subject string `json:"subject"`
+}
+
+// GetCommits returns the commits reachable from branch but not from the
+// default branch (i.e. git log <default>..<branch>). It runs the command
+// in the main repo directory. An empty slice (not an error) is returned
+// when there are no such commits.
+func (m *Manager) GetCommits(repo, branch string) ([]CommitInfo, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	repoDir := filepath.Join(m.reposDir, repo)
+	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("repo %q not found", repo)
+	}
+
+	defaultBranch, err := getDefaultBranch(repoDir)
+	if err != nil || defaultBranch == "" {
+		defaultBranch = "main"
+	}
+
+	// Format: hash<TAB>subject, one per line.
+	out, err := runCmd(repoDir, "git", "log",
+		defaultBranch+".."+branch,
+		"--pretty=format:%H\t%s",
+	)
+	if err != nil {
+		// If the branch doesn't exist yet the command will fail — return empty.
+		return []CommitInfo{}, nil
+	}
+
+	var commits []CommitInfo
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		ci := CommitInfo{Hash: parts[0]}
+		if len(parts) == 2 {
+			ci.Subject = parts[1]
+		}
+		commits = append(commits, ci)
+	}
+	return commits, nil
+}
+
 // worktreeDirLocked resolves the worktree directory for repo/branch without
 // acquiring the mutex (the caller must already hold it).
 func (m *Manager) worktreeDirLocked(repo, branch string) (string, error) {

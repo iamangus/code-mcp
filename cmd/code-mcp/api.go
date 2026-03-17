@@ -182,6 +182,19 @@ func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestS
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// GET /api/repos/{repo}/branches/{branch}/commits
+	// Returns commits reachable from branch but not from the default branch.
+	mux.HandleFunc("GET /api/repos/{repo}/branches/{branch}/commits", func(w http.ResponseWriter, r *http.Request) {
+		repo := r.PathValue("repo")
+		branch := r.PathValue("branch")
+		commits, err := mgr.GetCommits(repo, branch)
+		if err != nil {
+			apiError(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"commits": commits})
+	})
+
 	// POST /api/repos/{repo}/branches/{branch}/test/run
 	mux.HandleFunc("POST /api/repos/{repo}/branches/{branch}/test/run", func(w http.ResponseWriter, r *http.Request) {
 		repo := r.PathValue("repo")
