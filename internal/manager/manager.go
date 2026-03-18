@@ -198,30 +198,36 @@ func (m *Manager) RemoveRepo(name string) error {
 // base specifies the commit-ish to branch from when creating a brand-new
 // branch. If base is empty, HEAD of the main clone is used. base is ignored
 // when the branch already exists locally or at origin.
-func (m *Manager) CreateWorktree(repo, branch, base string) error {
+// CreateWorktree creates a git worktree at <reposDir>/<repo>-<branch> for the
+// given branch and returns the directory where the worktree lives.
+// For the default branch, the main repo directory is returned immediately
+// (git does not allow a separate worktree for the checked-out branch).
+// If a worktree for the branch already exists its directory is returned as-is.
+// This operation is idempotent.
+func (m *Manager) CreateWorktree(repo, branch, base string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Validate branch: must be a simple component (no path separators)
 	if branch == "" || strings.ContainsAny(branch, "/\\") {
-		return fmt.Errorf("invalid branch name %q (use '-' instead of '/' in the URL)", branch)
+		return "", fmt.Errorf("invalid branch name %q (use '-' instead of '/' in the URL)", branch)
 	}
 
 	repoDir := filepath.Join(m.reposDir, repo)
 	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
-		return fmt.Errorf("repo %q not found", repo)
+		return "", fmt.Errorf("repo %q not found", repo)
 	}
 
 	// The default branch is already checked out in the main repo directory —
 	// there is no separate worktree for it and git will refuse to add one.
 	if defaultBranch, _ := getDefaultBranch(repoDir); branch == defaultBranch {
-		return nil
+		return repoDir, nil
 	}
 
 	worktreeDir := filepath.Join(m.reposDir, repo+"-"+branch)
 	if _, err := os.Stat(worktreeDir); err == nil {
 		// Worktree already exists — nothing to do.
-		return nil
+		return worktreeDir, nil
 	}
 
 	// Fetch so that newly pushed branches are discoverable.
@@ -243,21 +249,21 @@ func (m *Manager) CreateWorktree(repo, branch, base string) error {
 				startPoint = "HEAD"
 			}
 			if out, err := m.runCmd(repoDir, "git", "worktree", "add", "-b", branch, worktreeDir, startPoint); err != nil {
-				return fmt.Errorf("git worktree add: %w\n%s", err, out)
+				return "", fmt.Errorf("git worktree add: %w\n%s", err, out)
 			}
 			// Push the new branch to origin so GitHub knows about it.
 			if out, pushErr := m.runCmd(repoDir, "git", "push", "-u", "origin", branch); pushErr != nil {
 				log.Printf("manager: git push origin %s (non-fatal): %v\n%s", branch, pushErr, out)
 			}
-			return nil
+			return worktreeDir, nil
 		}
 	}
 
 	// Branch exists locally or at origin — check it out into the worktree.
 	if out, err := m.runCmd(repoDir, "git", "worktree", "add", worktreeDir, branch); err != nil {
-		return fmt.Errorf("git worktree add: %w\n%s", err, out)
+		return "", fmt.Errorf("git worktree add: %w\n%s", err, out)
 	}
-	return nil
+	return worktreeDir, nil
 }
 
 // PushBranch pushes the given branch to the origin remote.

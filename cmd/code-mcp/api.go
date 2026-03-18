@@ -126,17 +126,19 @@ func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestS
 			apiError(w, "branch is required", http.StatusBadRequest)
 			return
 		}
-		if err := mgr.CreateWorktree(repo, body.Branch, body.Base); err != nil {
+		wtDir, err := mgr.CreateWorktree(repo, body.Branch, body.Base)
+		if err != nil {
 			apiError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		wtDir := mgr.BranchWorktreeDir(repo, body.Branch)
 		// Fail loudly if .opendev/config.yaml is missing or invalid — the
 		// worktree was created successfully but we cannot proceed without a
 		// registered test command.
 		if _, err := config.Load(wtDir); err != nil {
-			// Remove the worktree we just created so the state stays clean.
-			_ = mgr.RemoveWorktree(repo, body.Branch)
+			// Only remove if this is a real worktree (not the main repo dir).
+			if wtDir != mgr.RepoDir(repo) {
+				_ = mgr.RemoveWorktree(repo, body.Branch)
+			}
 			apiError(w, "branch created but .opendev/config.yaml is invalid: "+err.Error(), http.StatusBadRequest)
 			return
 		}
