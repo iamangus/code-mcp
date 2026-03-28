@@ -12,6 +12,7 @@ import (
 
 	"github.com/iamangus/code-mcp/internal/config"
 	githubpkg "github.com/iamangus/code-mcp/internal/github"
+	"github.com/iamangus/code-mcp/internal/gitops"
 	"github.com/iamangus/code-mcp/internal/locks"
 	"github.com/iamangus/code-mcp/internal/manager"
 	"github.com/iamangus/code-mcp/internal/tools"
@@ -96,7 +97,8 @@ func runSingleServer(mode, addr, dir string) {
 // MCP endpoint layout:  http://host:port/{repo}/{branch}/{profile}/mcp
 // Management API:       http://host:port/api/repos[/...]
 func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Client) {
-	mgr, err := manager.New(reposDir, githubToken)
+	gitOps := gitops.NewExec(slog.Default(), githubToken)
+	mgr, err := manager.New(reposDir, gitOps, slog.Default())
 	if err != nil {
 		log.Fatalf("manager: %v", err)
 	}
