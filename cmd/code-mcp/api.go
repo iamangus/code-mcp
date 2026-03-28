@@ -28,7 +28,7 @@ import (
 //	POST   /api/repos/{repo}/pulls                           – create a draft PR (GitHub)
 //	PATCH  /api/repos/{repo}/pulls/{number}                  – update PR body (GitHub)
 //	POST   /api/repos/{repo}/pulls/{number}/ready            – promote draft PR to ready-for-review (GitHub)
-func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestStore, ghClient *githubpkg.Client, onAdded func(repo, branch, dir string), onRemoved func(repo, branch string)) {
+func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestStore, ghClient githubpkg.Client, onAdded func(repo, branch, dir string), onRemoved func(repo, branch string)) {
 	// GET /api/repos
 	mux.HandleFunc("GET /api/repos", func(w http.ResponseWriter, r *http.Request) {
 		repos, err := mgr.Scan()
@@ -258,12 +258,14 @@ func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestS
 			apiError(w, "title, head, and base are required", http.StatusBadRequest)
 			return
 		}
-		prNumber, prURL, err := ghClient.CreatePR(r.Context(), repo, body.Title, body.Head, body.Base, body.Body, body.Draft)
+		pr, err := ghClient.CreatePR(r.Context(), githubpkg.CreatePROptions{
+			Repo: repo, Title: body.Title, Head: body.Head, Base: body.Base, Body: body.Body, Draft: body.Draft,
+		})
 		if err != nil {
 			apiError(w, "creating PR: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"pr_number": prNumber, "pr_url": prURL})
+		writeJSON(w, http.StatusCreated, map[string]any{"pr_number": pr.Number, "pr_url": pr.HTMLURL})
 	})
 
 	// PATCH /api/repos/{repo}/pulls/{number}  {"body":"...", "draft":false}
@@ -286,7 +288,7 @@ func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestS
 			apiError(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := ghClient.UpdatePR(r.Context(), repo, prNumber, body.Body, body.Draft); err != nil {
+		if err := ghClient.UpdatePR(r.Context(), repo, prNumber, body.Body); err != nil {
 			apiError(w, "updating PR: "+err.Error(), http.StatusBadGateway)
 			return
 		}

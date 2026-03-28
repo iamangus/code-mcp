@@ -1,5 +1,3 @@
-// Package github provides a minimal GitHub REST API client for PR management.
-// It uses only the Go standard library — no external SDK dependency.
 package github
 
 import (
@@ -8,102 +6,129 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"time"
 )
 
-const apiBase = "https://api.github.com"
+const defaultBaseURL = "https://api.github.com"
 
-// Client is a GitHub API client scoped to a single owner (user or org).
-type Client struct {
-	token string
-	owner string
-	http  *http.Client
+// HTTPClient implements Client using the GitHub REST API.
+type HTTPClient struct {
+	token   string
+	owner   string
+	baseURL string
+	http    *http.Client
+	logger  *slog.Logger
 }
 
-// NewClient returns a Client authenticated with token and scoped to owner.
-func NewClient(token, owner string) *Client {
-	return &Client{token: token, owner: owner, http: &http.Client{}}
+// HTTPClientOption configures an HTTPClient.
+type HTTPClientOption func(*HTTPClient)
+
+// WithBaseURL overrides the GitHub API base URL (used in tests).
+func WithBaseURL(url string) HTTPClientOption {
+	return func(c *HTTPClient) { c.baseURL = url }
 }
 
-// CreatePR opens a pull request on GitHub.
-// Returns the PR number and HTML URL on success.
-// When draft is true the PR is opened as a draft.
-func (c *Client) CreatePR(ctx context.Context, repo, title, head, base, body string, draft bool) (prNumber int, htmlURL string, err error) {
+// NewHTTPClient creates a new GitHub API client.
+func NewHTTPClient(token, owner string, logger *slog.Logger, opts ...HTTPClientOption) *HTTPClient {
+	c := &HTTPClient{
+		token:   token,
+		owner:   owner,
+		baseURL: defaultBaseURL,
+		http:    &http.Client{},
+		logger:  logger,
+	}
+	for _, o := range opts {
+		o(c)
+	}
+	return c
+}
+
+func (c *HTTPClient) CreatePR(ctx context.Context, opts CreatePROptions) (*PR, error) {
+	start := time.Now()
+	path := fmt.Sprintf("/repos/%s/%s/pulls", c.owner, opts.Repo)
 	payload := map[string]any{
-		"title": title,
-		"head":  head,
-		"base":  base,
-		"body":  body,
-		"draft": draft,
+		"title": opts.Title,
+		"head":  opts.Head,
+		"base":  opts.Base,
+		"body":  opts.Body,
+		"draft": opts.Draft,
 	}
-	var result struct {
-		Number  int    `json:"number"`
-		HTMLURL string `json:"html_url"`
+
+	var pr PR
+	if err := c.do(ctx, http.MethodPost, path, payload, &pr); err != nil {
+		c.logger.Error("github: CreatePR failed", "repo", opts.Repo, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return nil, err
 	}
-	path := fmt.Sprintf("/repos/%s/%s/pulls", c.owner, repo)
-	if err := c.do(ctx, http.MethodPost, path, payload, &result); err != nil {
-		return 0, "", err
-	}
-	return result.Number, result.HTMLURL, nil
+	c.logger.Info("github: PR created", "repo", opts.Repo, "number", pr.Number, "duration_ms", time.Since(start).Milliseconds())
+	return &pr, nil
 }
 
-// UpdatePR patches an existing PR's body text.
-// draft is passed through — set it to false to keep the PR in its current
-// draft state unchanged (GitHub ignores a no-op draft:false on a non-draft PR).
-func (c *Client) UpdatePR(ctx context.Context, repo string, number int, body string, draft bool) error {
-	payload := map[string]any{
-		"body":  body,
-		"draft": draft,
-	}
+func (c *HTTPClient) UpdatePR(ctx context.Context, repo string, number int, body string) error {
+	start := time.Now()
 	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, repo, number)
-	return c.do(ctx, http.MethodPatch, path, payload, nil)
+	payload := map[string]any{"body": body}
+
+	if err := c.do(ctx, http.MethodPatch, path, payload, nil); err != nil {
+		c.logger.Error("github: UpdatePR failed", "repo", repo, "number", number, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return err
+	}
+	c.logger.Info("github: PR updated", "repo", repo, "number", number, "duration_ms", time.Since(start).Milliseconds())
+	return nil
 }
 
-// PromotePR converts a draft PR to ready-for-review.
-// It only sends draft:false so the existing body is preserved.
-func (c *Client) PromotePR(ctx context.Context, repo string, number int) error {
+func (c *HTTPClient) PromotePR(ctx context.Context, repo string, number int) error {
+	start := time.Now()
+	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, repo, number)
 	payload := map[string]any{"draft": false}
-	path := fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, repo, number)
-	return c.do(ctx, http.MethodPatch, path, payload, nil)
+
+	if err := c.do(ctx, http.MethodPatch, path, payload, nil); err != nil {
+		c.logger.Error("github: PromotePR failed", "repo", repo, "number", number, "error", err, "duration_ms", time.Since(start).Milliseconds())
+		return err
+	}
+	c.logger.Info("github: PR promoted", "repo", repo, "number", number, "duration_ms", time.Since(start).Milliseconds())
+	return nil
 }
 
-// do executes an authenticated GitHub API request and decodes the response
-// into out (may be nil to discard the response body).
-func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+func (c *HTTPClient) do(ctx context.Context, method, path string, reqBody any, out any) error {
 	var bodyReader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	if reqBody != nil {
+		data, err := json.Marshal(reqBody)
 		if err != nil {
-			return fmt.Errorf("github: marshal request: %w", err)
+			return fmt.Errorf("marshal request: %w", err)
 		}
-		bodyReader = bytes.NewReader(b)
+		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, apiBase+path, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
-		return fmt.Errorf("github: build request: %w", err)
+		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if body != nil {
+	if reqBody != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("github: %s %s: %w", method, path, err)
+		return err
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("github: %s %s: status %d: %s", method, path, resp.StatusCode, respBody)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("github API %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
 	}
+
 	if out != nil && len(respBody) > 0 {
 		if err := json.Unmarshal(respBody, out); err != nil {
-			return fmt.Errorf("github: decode response: %w", err)
+			return fmt.Errorf("decode response: %w", err)
 		}
 	}
 	return nil
 }
+
+// Compile-time check that HTTPClient implements Client.
+var _ Client = (*HTTPClient)(nil)
