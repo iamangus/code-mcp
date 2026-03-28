@@ -130,18 +130,20 @@ func TestCreateWorktree_NewBranch(t *testing.T) {
 
 func TestCreateWorktree_DefaultBranch(t *testing.T) {
 	mgr, fake := newTestManager(t)
-	repoDir := createFakeRepo(t, mgr, "repo")
+	createFakeRepo(t, mgr, "repo")
 	fake.StringReturns["DefaultBranch"] = "main"
+	fake.BoolReturns["BranchExists"] = true
 
 	dir, err := mgr.CreateWorktree("repo", "main", "")
 	if err != nil {
 		t.Fatalf("CreateWorktree: %v", err)
 	}
-	if dir != repoDir {
-		t.Errorf("expected repo dir %q for default branch, got %q", repoDir, dir)
+	want := mgr.BranchWorktreeDir("repo", "main")
+	if dir != want {
+		t.Errorf("expected worktree dir %q for default branch, got %q", want, dir)
 	}
-	if fake.HasCall("WorktreeAdd") {
-		t.Error("should not call WorktreeAdd for default branch")
+	if !fake.HasCall("WorktreeAdd") {
+		t.Error("expected WorktreeAdd for default branch")
 	}
 }
 

@@ -12,7 +12,6 @@ import (
 var validBranchName = regexp.MustCompile(`^[a-zA-Z0-9._/-]+$`)
 
 // WorktreeDir returns the directory for a repo/branch pair.
-// For the default branch, returns the bare repo dir.
 func (m *Manager) WorktreeDir(repo, branch string) (string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -23,15 +22,6 @@ func (m *Manager) worktreeDirLocked(repo, branch string) (string, error) {
 	repoDir := m.RepoDir(repo)
 	if _, err := os.Stat(repoDir); os.IsNotExist(err) {
 		return "", fmt.Errorf("repo %q not found", repo)
-	}
-
-	ctx := context.Background()
-	defaultBranch, err := m.git.DefaultBranch(ctx, repoDir)
-	if err != nil {
-		return "", fmt.Errorf("cannot determine default branch: %w", err)
-	}
-	if branch == defaultBranch {
-		return repoDir, nil
 	}
 
 	wtDir := m.BranchWorktreeDir(repo, branch)
@@ -56,15 +46,6 @@ func (m *Manager) CreateWorktree(repo, branch, base string) (string, error) {
 		return "", fmt.Errorf("repo %q not found", repo)
 	}
 
-	defaultBranch, err := m.git.DefaultBranch(ctx, repoDir)
-	if err != nil {
-		return "", fmt.Errorf("cannot determine default branch: %w", err)
-	}
-	if branch == defaultBranch {
-		m.logger.Info("worktree: branch is default, returning repo dir", "repo", repo, "branch", branch)
-		return repoDir, nil
-	}
-
 	wtDir := m.BranchWorktreeDir(repo, branch)
 
 	if _, err := os.Stat(wtDir); err == nil {
@@ -85,6 +66,10 @@ func (m *Manager) CreateWorktree(repo, branch, base string) (string, error) {
 		return "", err
 	}
 	if !exists {
+		defaultBranch, err := m.git.DefaultBranch(ctx, repoDir)
+		if err != nil {
+			return "", fmt.Errorf("cannot determine default branch: %w", err)
+		}
 		startPoint := defaultBranch
 		if base != "" {
 			startPoint = base
