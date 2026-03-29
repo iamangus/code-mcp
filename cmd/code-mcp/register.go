@@ -146,8 +146,8 @@ func registerReadTools(s *server.MCPServer, lm *locks.Manager, worktreeRoot stri
 }
 
 // registerWriteTools registers the write/mutate tool set on s.
-// Included: create_file, search_and_replace, execute_terminal_command, register_test.
-func registerWriteTools(s *server.MCPServer, lm *locks.Manager, worktreeRoot string, ts *tools.TestStore, logger *slog.Logger) {
+// Included: create_file, search_and_replace, execute_terminal_command.
+func registerWriteTools(s *server.MCPServer, lm *locks.Manager, worktreeRoot string, logger *slog.Logger) {
 	// create_file
 	s.AddTool(
 		mcp.NewTool("create_file",
@@ -246,43 +246,16 @@ func registerWriteTools(s *server.MCPServer, lm *locks.Manager, worktreeRoot str
 			return mcp.NewToolResultText(result), nil
 		},
 	)
-
-	// register_test
-	s.AddTool(
-		mcp.NewTool("register_test",
-			mcp.WithDescription("Register a test command to be run against this worktree. The command will be executed from the worktree root directory. Only one test can be registered at a time; calling this again overwrites the previous registration."),
-			mcp.WithString("command", mcp.Required(), mcp.Description("The shell command to run the tests (e.g. 'go test ./...', 'npm test', 'pytest').")),
-			mcp.WithString("description", mcp.Description("Optional human-readable description of what the test verifies.")),
-		),
-		func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			start := time.Now()
-			command, err := req.RequireString("command")
-			if err != nil {
-				logger.Error("tool call failed", "tool", "register_test", "error", err, "duration_ms", time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(err.Error()), nil
-			}
-			description := req.GetString("description", "")
-			msg, toolErr := tools.RegisterTest(worktreeRoot, command, description, ts)
-			if toolErr != nil {
-				logger.Error("tool call failed", "tool", "register_test", "error", toolErr, "duration_ms", time.Since(start).Milliseconds())
-				return mcp.NewToolResultError(toolErr.Error()), nil
-			}
-			logger.Info("tool call completed", "tool", "register_test", "command", command, "duration_ms", time.Since(start).Milliseconds())
-			return mcp.NewToolResultText(msg), nil
-		},
-	)
 }
 
-// newMCPHandler creates an http.Handler for the given profile, backed by a new
-// MCP server instance constrained to worktreeRoot.
-func newMCPHandler(profile Profile, worktreeRoot string, ts *tools.TestStore, logger *slog.Logger) *server.StreamableHTTPServer {
+func newMCPHandler(profile Profile, worktreeRoot string, logger *slog.Logger) *server.StreamableHTTPServer {
 	lm := locks.NewManager(logger)
 	s := server.NewMCPServer("code-mcp", "1.0.0", server.WithToolCapabilities(true))
 	switch profile {
 	case ProfileRead:
 		registerReadTools(s, lm, worktreeRoot, logger)
 	case ProfileWrite:
-		registerWriteTools(s, lm, worktreeRoot, ts, logger)
+		registerWriteTools(s, lm, worktreeRoot, logger)
 	}
 	return server.NewStreamableHTTPServer(s)
 }

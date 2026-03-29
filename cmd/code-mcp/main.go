@@ -9,12 +9,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/iamangus/code-mcp/internal/config"
 	githubpkg "github.com/iamangus/code-mcp/internal/github"
 	"github.com/iamangus/code-mcp/internal/gitops"
 	"github.com/iamangus/code-mcp/internal/locks"
 	"github.com/iamangus/code-mcp/internal/manager"
-	"github.com/iamangus/code-mcp/internal/tools"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -87,13 +85,11 @@ func runSingleServer(mode, addr, dir string, logger *slog.Logger) {
 		os.Exit(1)
 	}
 
-	ts := tools.NewTestStore()
-
 	switch mode {
 	case "http":
 		mux := http.NewServeMux()
 		for _, p := range Profiles {
-			h := newMCPHandler(p, dir, ts, logger)
+			h := newMCPHandler(p, dir, logger)
 			pattern := "/" + string(p) + "/mcp"
 			mux.Handle(pattern, h)
 			logger.Info("registered MCP handler", "profile", p, "dir", dir)
@@ -104,7 +100,6 @@ func runSingleServer(mode, addr, dir string, logger *slog.Logger) {
 			os.Exit(1)
 		}
 	default:
-		// stdio is inherently single-stream; serve the read profile.
 		lm := locks.NewManager(slog.Default())
 		s := server.NewMCPServer("code-mcp", "1.0.0", server.WithToolCapabilities(true))
 		registerReadTools(s, lm, dir, logger)
@@ -127,10 +122,6 @@ func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Clien
 		os.Exit(1)
 	}
 
-	// Shared test store across all worktrees.
-	ts := tools.NewTestStore()
-
-	// handlers maps "repo/branch/profile" → http.Handler for that MCP server.
 	var mu sync.RWMutex
 	handlers := make(map[string]http.Handler)
 
@@ -139,22 +130,9 @@ func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Clien
 		defer mu.Unlock()
 		for _, p := range Profiles {
 			key := repo + "/" + branch + "/" + string(p)
-			handlers[key] = newMCPHandler(p, dir, ts, logger)
+			handlers[key] = newMCPHandler(p, dir, logger)
 			logger.Info("registered MCP handler", "repo", repo, "branch", branch, "profile", p, "dir", dir)
 		}
-		// Auto-register the test command from .opendev/config.yaml if present.
-		// Failures are logged but not fatal here — the branch creation REST
-		// endpoint is responsible for failing loudly on missing config.
-		cfg, err := config.Load(dir)
-		if err != nil {
-			logger.Warn("config: test command not registered", "repo", repo, "branch", branch, "error", err)
-			return
-		}
-		if _, err := tools.RegisterTest(dir, cfg.TestCommand, "", ts); err != nil {
-			logger.Warn("config: registering test command failed", "repo", repo, "branch", branch, "error", err)
-			return
-		}
-		logger.Info("config: registered test command", "repo", repo, "branch", branch, "cmd", cfg.TestCommand)
 	}
 
 	removeHandlers := func(repo, branch string) {
@@ -167,7 +145,6 @@ func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Clien
 		}
 	}
 
-	// Discover existing repos on startup.
 	repos, err := mgr.Scan()
 	if err != nil {
 		logger.Error("scanning repos failed", "error", err)
@@ -180,10 +157,6 @@ func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Clien
 	}
 	logger.Info("startup: repos discovered", "count", len(repos), "dir", reposDir)
 
-	// Use two separate ServeMux instances to avoid Go 1.22+ pattern-conflict
-	// panics between the catch-all MCP wildcard and the API routes.
-
-	// MCP mux: /{repo}/{branch}/{profile}/mcp
 	mcpMux := http.NewServeMux()
 	mcpMux.HandleFunc("/{repo}/{branch}/{profile}/mcp", func(w http.ResponseWriter, r *http.Request) {
 		repo := r.PathValue("repo")
@@ -200,11 +173,9 @@ func runMultiServer(addr, reposDir, githubToken string, ghClient githubpkg.Clien
 		h.ServeHTTP(w, r)
 	})
 
-	// API mux: /api/...
 	apiMux := http.NewServeMux()
-	registerAPIRoutes(apiMux, mgr, ts, ghClient, logger, addHandlers, removeHandlers)
+	registerAPIRoutes(apiMux, mgr, ghClient, logger, addHandlers, removeHandlers)
 
-	// Top-level handler: dispatch to API mux for /api/ paths, otherwise MCP mux.
 	top := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
 			apiMux.ServeHTTP(w, r)

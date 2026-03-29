@@ -28,7 +28,7 @@ import (
 //	POST   /api/repos/{repo}/pulls                           – create a draft PR (GitHub)
 //	PATCH  /api/repos/{repo}/pulls/{number}                  – update PR body (GitHub)
 //	POST   /api/repos/{repo}/pulls/{number}/ready            – promote draft PR to ready-for-review (GitHub)
-func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestStore, ghClient githubpkg.Client, logger *slog.Logger, onAdded func(repo, branch, dir string), onRemoved func(repo, branch string)) {
+func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ghClient githubpkg.Client, logger *slog.Logger, onAdded func(repo, branch, dir string), onRemoved func(repo, branch string)) {
 	// GET /api/repos
 	mux.HandleFunc("GET /api/repos", func(w http.ResponseWriter, r *http.Request) {
 		repos, err := mgr.Scan()
@@ -228,7 +228,7 @@ func registerAPIRoutes(mux *http.ServeMux, mgr *manager.Manager, ts *tools.TestS
 
 		logger.Info("test run: starting", "repo", repo, "branch", branch, "timeout_s", timeout.Seconds())
 
-		result, err := tools.RunRegisteredTest(wtDir, ts, timeout, logger)
+		result, err := tools.RunTest(wtDir, timeout, logger)
 		if err != nil {
 			logger.Error("test run: failed to execute", "repo", repo, "branch", branch, "error", err)
 			apiError(w, err.Error(), http.StatusNotFound, logger)

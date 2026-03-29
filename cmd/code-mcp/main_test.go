@@ -15,7 +15,6 @@ import (
 	"github.com/iamangus/code-mcp/internal/gitops"
 	"github.com/iamangus/code-mcp/internal/locks"
 	"github.com/iamangus/code-mcp/internal/manager"
-	"github.com/iamangus/code-mcp/internal/tools"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -61,9 +60,8 @@ func TestProfiles(t *testing.T) {
 // a non-nil handler for each known profile.
 func TestNewMCPHandler_ProfilesProduceHandlers(t *testing.T) {
 	dir := t.TempDir()
-	ts := tools.NewTestStore()
 	for _, p := range Profiles {
-		h := newMCPHandler(p, dir, ts, slog.Default())
+		h := newMCPHandler(p, dir, slog.Default())
 		if h == nil {
 			t.Errorf("newMCPHandler(%q) returned nil", p)
 		}
@@ -86,7 +84,7 @@ func TestRegisterReadTools_ToolList(t *testing.T) {
 	toolNames := listMCPTools(t, ts.URL)
 
 	wantPresent := []string{"read_file", "read_lines", "list_directory", "grep_search", "get_git_diff"}
-	wantAbsent := []string{"create_file", "search_and_replace", "execute_terminal_command", "register_test"}
+	wantAbsent := []string{"create_file", "search_and_replace", "execute_terminal_command"}
 
 	for _, name := range wantPresent {
 		if !toolNames[name] {
@@ -105,18 +103,16 @@ func TestRegisterReadTools_ToolList(t *testing.T) {
 func TestRegisterWriteTools_ToolList(t *testing.T) {
 	dir := t.TempDir()
 	lm := locks.NewManager(slog.Default())
-	store := tools.NewTestStore()
 	s := server.NewMCPServer("code-mcp", "1.0.0", server.WithToolCapabilities(true))
-	registerWriteTools(s, lm, dir, store, slog.Default())
+	registerWriteTools(s, lm, dir, slog.Default())
 
-	// Use stateless mode so tests don't need to manage session negotiation.
 	h := server.NewStreamableHTTPServer(s, server.WithStateLess(true))
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
 	toolList := listMCPTools(t, ts.URL)
 
-	wantPresent := []string{"create_file", "search_and_replace", "execute_terminal_command", "register_test"}
+	wantPresent := []string{"create_file", "search_and_replace", "execute_terminal_command"}
 	wantAbsent := []string{"read_file", "read_lines", "list_directory", "grep_search", "get_git_diff"}
 
 	for _, name := range wantPresent {
@@ -152,7 +148,6 @@ func TestMultiServerRouting(t *testing.T) {
 		t.Fatalf("manager.New: %v", err)
 	}
 
-	store := tools.NewTestStore()
 	handlers := map[string]http.Handler{}
 
 	repos, err := mgr.Scan()
@@ -163,7 +158,7 @@ func TestMultiServerRouting(t *testing.T) {
 		for _, b := range repo.Branches {
 			for _, p := range Profiles {
 				key := repo.Name + "/" + b.Name + "/" + string(p)
-				handlers[key] = newMCPHandler(p, b.Dir, store, slog.Default())
+				handlers[key] = newMCPHandler(p, b.Dir, slog.Default())
 			}
 		}
 	}
